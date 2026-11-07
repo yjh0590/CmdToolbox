@@ -6,7 +6,7 @@ cmd에서 직접 입력하던 Windows 명령어들을 버튼으로 모아둔 데
 
 | # | 기능 | 명령어 |
 |---|---|---|
-| 1 | 종료 예약 (원형 카운트다운) | `shutdown -s -t`, `shutdown -a` |
+| 1 | 종료 예약 ("몇 시간 뒤" 또는 "몇 시 몇 분에", 앱을 다시 열어도 유지) | `shutdown -s -t`, `shutdown -a` |
 | 2 | 전원 (잠금, 절전, 로그아웃, 재시작, 종료) | `shutdown -l`, `shutdown -r -t 0` 등 |
 | 3 | IP 확인 | `ipconfig`, `ipconfig /all` |
 | 4 | 인터넷 연결 확인 | `ping`, `tracert` |
