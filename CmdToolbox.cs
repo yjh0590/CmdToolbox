@@ -84,6 +84,8 @@ class RoundButton : PaintedControl
 
     public RoundButton() { Cursor = Cursors.Hand; }
 
+    public void PerformClick() { if (Enabled) OnClick(EventArgs.Empty); }
+
     protected override void OnMouseEnter(EventArgs e) { hover = true; Invalidate(); base.OnMouseEnter(e); }
     protected override void OnMouseLeave(EventArgs e) { hover = false; down = false; Invalidate(); base.OnMouseLeave(e); }
     protected override void OnMouseDown(MouseEventArgs e) { down = true; Invalidate(); base.OnMouseDown(e); }
@@ -406,7 +408,7 @@ class Page : Panel
         });
         Controls.Add(new Label
         {
-            Text = desc, ForeColor = Theme.Dim, Location = new Point(34, 66), Size = new Size(540, 22)
+            Text = desc, ForeColor = Theme.Dim, Location = new Point(34, 66), Size = new Size(540, 22), AutoEllipsis = true
         });
         if (command != null)
             Controls.Add(new Label
@@ -426,9 +428,9 @@ class CommandPage : Page
 
     readonly TextBox output;
     readonly List<RoundButton> buttons = new List<RoundButton>();
+    readonly List<Control> slots = new List<Control>(); // 위쪽 한 줄에 놓이는 입력 칸과 버튼들
     readonly StringBuilder pending = new StringBuilder();
     readonly Timer flush = new Timer { Interval = 100 };
-    int nextX = 32;
     RoundButton running;
     CancellationTokenSource cts;
     bool fresh;   // 아직 "실행 중..."만 보이는 상태
@@ -444,7 +446,7 @@ class CommandPage : Page
         var card = new Card { Location = new Point(32, 196), Size = new Size(536, 336) };
         output = new TextBox
         {
-            Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, WordWrap = true,
+            Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Both, WordWrap = false, // 표가 깨지지 않게 줄바꿈 안 함
             BorderStyle = BorderStyle.None, BackColor = Theme.Surface, ForeColor = Theme.Text, Font = Theme.Mono,
             Location = new Point(16, 14), Size = new Size(510, 310),
             Text = "버튼을 누르면 결과가 여기에 표시됩니다."
@@ -461,15 +463,52 @@ class CommandPage : Page
         bool primary = buttons.Count == 0;
         var b = new RoundButton
         {
-            Text = text, Location = new Point(nextX, 136), Size = new Size(150, 42),
+            Text = text, Size = new Size(150, 42),
             Fill = primary ? Theme.Accent : Theme.Surface, HoverFill = primary ? Theme.AccentHover : Theme.SurfaceHover,
             ForeColor = primary ? Theme.Bg : Theme.Text,
             Font = primary ? new Font("Malgun Gothic", 10f, FontStyle.Bold) : Theme.Body
         };
         buttons.Add(b);
+        slots.Add(b);
         Controls.Add(b);
-        nextX += 160;
+        Relayout();
         return b;
+    }
+
+    // 개수가 많으면 너비를 줄여서 한 줄에 맞춤
+    void Relayout()
+    {
+        int n = slots.Count;
+        int w = Math.Min(150, (536 - (n - 1) * 10) / n);
+        for (int i = 0; i < n; i++)
+            slots[i].Bounds = new Rectangle(32 + i * (w + 10), 136, w, 42);
+    }
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    static extern IntPtr SendMessage(IntPtr hwnd, int msg, IntPtr wp, string lp);
+
+    // 버튼 줄 맨 앞에 입력 칸 추가. Enter를 누르면 첫 번째 버튼 실행
+    public TextBox AddInput(string hint)
+    {
+        var card = new Card();
+        var box = new TextBox
+        {
+            BorderStyle = BorderStyle.None, BackColor = Theme.Surface, ForeColor = Theme.Text, Font = Theme.Body,
+            Location = new Point(12, 11), Width = 126, Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top
+        };
+        box.HandleCreated += (s, e) => SendMessage(box.Handle, 0x1501, (IntPtr)1, hint); // 회색 안내 문구
+        box.KeyDown += (s, e) =>
+        {
+            if (e.KeyCode != Keys.Enter) return;
+            e.SuppressKeyPress = true;
+            if (running == null) buttons[0].PerformClick();
+        };
+        card.Size = new Size(150, 42);
+        card.Controls.Add(box);
+        slots.Insert(0, card);
+        Controls.Add(card);
+        Relayout();
+        return box;
     }
 
     void AddButton(string text, Action act)
@@ -850,12 +889,20 @@ static class Features
     {
         return new CommandPage("IP 확인", "이 PC의 네트워크 주소(IPv4, 게이트웨이 등)를 확인합니다.", "ipconfig",
             "IP 확인", Live("ipconfig", ""),
-            "자세히 (/all)", Live("ipconfig", "/all"));
+            "자세히 (/all)", Live("ipconfig", "/all"),
+            "공인 IP", (CommandPage.Action)(async p =>
+            {
+                string ip = await Shell.Capture("curl", "-s -m 8 https://ifconfig.me", p.Token);
+                return ip == "" || ip.Contains(" ")
+                    ? "공인 IP를 가져오지 못했습니다. 인터넷 연결을 확인하세요.\n\n" + ip
+                    : "공인 IP (인터넷에서 보이는 이 PC의 주소)\n\n" + ip +
+                      "\n\n위의 [IP 확인]에 나오는 192.168.x.x 같은 주소는 집이나 회사 안에서만 쓰는 주소입니다.";
+            }));
     }
 
     public static Page Ping()
     {
-        return new CommandPage("인터넷 연결 확인", "외부 서버에 신호를 보내 인터넷이 되는지, 응답 속도는 어떤지 확인합니다.", "ping google.com",
+        return new CommandPage("인터넷 연결 확인", "인터넷이 되는지 확인하고, 안 되면 IP를 다시 받거나 설정을 초기화합니다.", "ping google.com",
             "연결 확인", (CommandPage.Action)(async p =>
             {
                 p.Append("[ 8.8.8.8 (인터넷 연결) ]");
@@ -865,8 +912,26 @@ static class Features
                 await p.Run("ping", "-n 4 google.com");
                 return null;
             }),
-            "경로 추적", Live("tracert", "-d -h 15 8.8.8.8"));
+            "경로 추적", Live("tracert", "-d -h 15 8.8.8.8"),
+            "IP 다시 받기", (CommandPage.Action)(p =>
+            {
+                if (!Shell.Confirm("공유기에서 IP를 다시 받습니다.\n인터넷이 몇 초 동안 끊깁니다. 계속할까요?")) return Done(null);
+                return Done(Shell.RunAdmin("ipconfig /release & ipconfig /renew")
+                    ? "관리자 권한 cmd 창에서 IP를 다시 받고 있습니다.\n결과는 새로 열린 창에서 확인하세요."
+                    : "관리자 권한 요청이 취소되었습니다.");
+            }),
+            "네트워크 초기화", (CommandPage.Action)(p =>
+            {
+                if (!Shell.Confirm("네트워크 설정(Winsock, TCP/IP)을 초기화합니다.\n" +
+                                   "다른 방법으로 해결되지 않을 때만 쓰세요. 직접 넣은 고정 IP나 VPN 설정이 사라질 수 있고,\n" +
+                                   "끝난 뒤 PC를 재시작해야 적용됩니다. 계속할까요?")) return Done(null);
+                return Done(Shell.RunAdmin("netsh winsock reset & netsh int ip reset & ipconfig /flushdns & echo. & echo 끝났습니다. PC를 재시작하세요.")
+                    ? "관리자 권한 cmd 창에서 초기화를 시작했습니다.\n끝나면 PC를 재시작하세요."
+                    : "관리자 권한 요청이 취소되었습니다.");
+            }));
     }
+
+    static Task<string> Done(string text) { return Task.FromResult(text); }
 
     public static Page Dns()
     {
@@ -918,8 +983,8 @@ static class Features
     public static Page Temp()
     {
         string temp = Path.GetTempPath();
-        return new CommandPage("임시 파일 정리", "임시 폴더(%TEMP%)에서 하루 넘게 지난 파일을 지웁니다. 사용 중인 파일은 건너뜁니다.", "del /s /q %TEMP%\\*",
-            "정리하기", (CommandPage.Action)(async p =>
+        return new CommandPage("디스크 정리", "임시 파일, 휴지통, 최대 절전 파일을 지워 C 드라이브 용량을 확보합니다.", "del /s /q %TEMP%\\*",
+            "임시 파일 정리", (CommandPage.Action)(async p =>
             {
                 if (!Shell.Confirm("임시 폴더에서 하루 넘게 지난 파일을 삭제할까요?\n" + temp)) return "취소했습니다.";
                 return await Task.Run(() =>
@@ -931,7 +996,41 @@ static class Features
                         deleted, bytes / 1048576.0, recent, skipped);
                 });
             }),
-            "폴더 열기", (CommandPage.Action)(p => { Shell.Open(temp); return Task.FromResult<string>(null); }));
+            "휴지통 비우기", (CommandPage.Action)(p => Done(EmptyRecycleBin())),
+            "최대 절전 끄기", (CommandPage.Action)(async p =>
+            {
+                var hiber = new FileInfo(Path.Combine(Path.GetPathRoot(Environment.SystemDirectory), "hiberfil.sys"));
+                if (!hiber.Exists) return "최대 절전 모드가 이미 꺼져 있습니다. (hiberfil.sys 없음)";
+                if (!Shell.Confirm(string.Format("최대 절전 모드를 끄고 hiberfil.sys({0:0.0} GB)를 지울까요?\n\n" +
+                    "빠른 시작(Fast Startup)도 함께 꺼져서 부팅이 조금 느려질 수 있습니다.\n" +
+                    "다시 켜려면 관리자 cmd에서 powercfg /h on 을 실행하세요.", hiber.Length / 1073741824.0))) return null;
+                int code = await Shell.RunAdminHidden("powercfg", "/h off");
+                return code == 0 ? "최대 절전 모드를 껐습니다. hiberfil.sys가 지워졌습니다."
+                     : code == -1 ? "관리자 권한 요청이 취소되었습니다."
+                     : "실패했습니다. (코드 " + code + ")";
+            }),
+            "폴더 열기", (CommandPage.Action)(p => { Shell.Open(temp); return Done(null); }));
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct SHQUERYRBINFO { public int cbSize; public long i64Size; public long i64NumItems; }
+
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+    static extern int SHQueryRecycleBin(string root, ref SHQUERYRBINFO info);
+
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+    static extern int SHEmptyRecycleBin(IntPtr hwnd, string root, uint flags);
+
+    static string EmptyRecycleBin()
+    {
+        var info = new SHQUERYRBINFO { cbSize = Marshal.SizeOf(typeof(SHQUERYRBINFO)) };
+        SHQueryRecycleBin(null, ref info);
+        if (info.i64NumItems == 0) return "휴지통이 이미 비어 있습니다.";
+        string what = string.Format("{0}개, {1:0.0} MB", info.i64NumItems, info.i64Size / 1048576.0);
+        if (!Shell.Confirm("휴지통의 항목 " + what + "를 영구 삭제할까요?\n삭제하면 되돌릴 수 없습니다.")) return null;
+        const uint NoConfirm = 0x1, NoProgress = 0x2, NoSound = 0x4;
+        int hr = SHEmptyRecycleBin(IntPtr.Zero, null, NoConfirm | NoProgress | NoSound);
+        return hr == 0 ? "휴지통을 비웠습니다. (" + what + ")" : "휴지통을 비우지 못했습니다. (코드 0x" + hr.ToString("X8") + ")";
     }
 
     static void Clean(string dir, bool removeSelf, DateTime cutoff, ref long bytes, ref int deleted, ref int recent, ref int skipped)
@@ -965,9 +1064,26 @@ static class Features
 
     public static Page SystemInfo()
     {
-        return new CommandPage("시스템 정보", "Windows 버전, CPU, 메모리, 설치 날짜 등을 확인합니다. (몇 초 걸립니다)", "systeminfo",
+        return new CommandPage("시스템 정보", "Windows 버전, 메모리, 디스크 용량을 보고, 시계를 맞추거나 파일 해시를 확인합니다.", "systeminfo",
             "정보 보기", Live("systeminfo", ""),
-            "디스크 용량", (CommandPage.Action)(p => Task.FromResult(DiskInfo())));
+            "디스크 용량", (CommandPage.Action)(p => Done(DiskInfo())),
+            "시간 맞추기", (CommandPage.Action)(p => Done(Shell.RunAdmin("net start w32time & w32tm /resync")
+                ? "관리자 권한 cmd 창에서 인터넷 시간 서버와 시계를 맞추고 있습니다.\n결과는 새로 열린 창에서 확인하세요."
+                : "관리자 권한 요청이 취소되었습니다.")),
+            "파일 해시", (CommandPage.Action)(async p =>
+            {
+                string file;
+                using (var dlg = new OpenFileDialog { Title = "해시를 확인할 파일 선택" })
+                {
+                    if (dlg.ShowDialog() != DialogResult.OK) return null;
+                    file = dlg.FileName;
+                }
+                p.Append("파일: " + file);
+                p.Append("내려받은 사이트에 적힌 SHA256 값과 같으면 파일이 손상되거나 바뀌지 않은 것입니다.");
+                p.Append("");
+                await p.Run("certutil", "-hashfile \"" + file + "\" SHA256");
+                return null;
+            }));
     }
 
     static string DiskInfo()
@@ -1004,7 +1120,105 @@ static class Features
                 : "관리자 권한 요청이 취소되었습니다.")),
             "DISM 복구", (CommandPage.Action)(p => Task.FromResult(Shell.RunAdmin("DISM /Online /Cleanup-Image /RestoreHealth")
                 ? "관리자 권한 cmd 창에서 DISM 복구를 시작했습니다.\nSFC로 해결되지 않을 때 사용하고, 끝나면 SFC를 한 번 더 돌리세요."
+                : "관리자 권한 요청이 취소되었습니다.")),
+            "디스크 검사", (CommandPage.Action)(p => Task.FromResult(Shell.RunAdmin("chkdsk C: /scan")
+                ? "관리자 권한 cmd 창에서 C 드라이브 오류 검사를 시작했습니다. (검사만 하고 고치지는 않습니다)\n" +
+                  "오류가 나오면 관리자 cmd에서 chkdsk C: /f 를 실행하고 재시작하면 고칩니다."
                 : "관리자 권한 요청이 취소되었습니다.")));
+    }
+
+    // 포트 번호 또는 프로그램 이름으로 찾고 강제 종료
+    public static Page Ports()
+    {
+        var pids = new List<int>();
+        TextBox input = null;
+        var page = new CommandPage("포트·프로세스", "포트 번호나 프로그램 이름으로 실행 중인 프로그램을 찾아 강제로 끕니다.", "netstat -ano  →  taskkill /F /PID",
+            "찾기", (CommandPage.Action)(async p =>
+            {
+                string q = input.Text.Trim();
+                pids.Clear();
+                if (q == "") return "왼쪽 칸에 포트 번호(예: 3000) 또는 프로그램 이름(예: chrome)을 넣고 [찾기]를 누르세요.";
+                int port;
+                if (int.TryParse(q, out port)) return FindPort(await Shell.Capture("netstat", "-ano", p.Token), port, pids);
+                return FindProcess(q, pids);
+            }),
+            "강제 종료", (CommandPage.Action)(async p =>
+            {
+                if (pids.Count == 0) return "먼저 [찾기]로 끌 프로그램을 찾으세요.";
+                if (!Shell.Confirm("찾은 프로그램 " + pids.Count + "개를 강제로 끌까요?\n저장하지 않은 작업은 사라집니다.\n\nPID: " + string.Join(", ", pids))) return null;
+                string r = await Shell.Capture("taskkill", "/F /T /PID " + string.Join(" /PID ", pids), p.Token);
+                pids.Clear();
+                return r + "\n\n(\"액세스가 거부되었습니다\"가 나오면 관리자 권한으로 실행 중인 프로그램이라 끌 수 없습니다)";
+            }));
+        input = page.AddInput("포트 또는 이름");
+        return page;
+    }
+
+    static string ProcName(int pid)
+    {
+        try { using (var pr = Process.GetProcessById(pid)) return pr.ProcessName; }
+        catch { return "?"; }
+    }
+
+    static string FindPort(string netstat, int port, List<int> pids)
+    {
+        var sb = new StringBuilder();
+        foreach (string raw in netstat.Split('\n'))
+        {
+            string[] c = raw.Split(new[] { ' ', '\t', '\r' }, StringSplitOptions.RemoveEmptyEntries);
+            if (c.Length < 4 || (c[0] != "TCP" && c[0] != "UDP")) continue;
+            if (!c[1].EndsWith(":" + port)) continue; // 이 PC 쪽 주소가 그 포트인 것만
+            int pid;
+            if (!int.TryParse(c[c.Length - 1], out pid)) continue;
+            string state = c.Length > 4 ? string.Join(" ", c, 3, c.Length - 4) : "";
+            sb.AppendLine(string.Format("{0,-4} {1,-22} {2,-12} {3,7}  {4}", c[0], c[1], state, pid, ProcName(pid)));
+            if (pid > 4 && !pids.Contains(pid)) pids.Add(pid); // 0, 4는 Windows 자체
+        }
+        if (sb.Length == 0) return port + "번 포트를 쓰는 프로그램이 없습니다.";
+        return string.Format("{0,-4} {1,-22} {2,-12} {3,7}  {4}\n", "종류", "주소", "상태", "PID", "프로그램") + sb +
+               (pids.Count > 0 ? "\n[강제 종료]를 누르면 위 프로그램을 끕니다." : "\nWindows 시스템이 쓰는 포트라 끌 수 없습니다.");
+    }
+
+    static string FindProcess(string name, List<int> pids)
+    {
+        if (name.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) name = name.Substring(0, name.Length - 4);
+        var found = new List<Process>();
+        foreach (var pr in Process.GetProcesses())
+        {
+            bool match = false;
+            try { match = pr.Id > 4 && pr.ProcessName.IndexOf(name, StringComparison.OrdinalIgnoreCase) >= 0; } catch { } // 그 사이 꺼진 경우
+            if (match) found.Add(pr); else pr.Dispose();
+        }
+        if (found.Count == 0) return "'" + name + "'(이)가 들어간 프로그램이 실행 중이지 않습니다.";
+        found.Sort((a, b) => string.Compare(a.ProcessName, b.ProcessName, StringComparison.OrdinalIgnoreCase));
+
+        var sb = new StringBuilder();
+        sb.AppendLine(string.Format("{0,7}  {1,-24} {2,9}  {3}", "PID", "프로그램", "메모리", "창 제목"));
+        foreach (var pr in found)
+        {
+            string title = "";
+            long mem = 0;
+            try { title = pr.MainWindowTitle; mem = pr.WorkingSet64; } catch { }
+            sb.AppendLine(string.Format("{0,7}  {1,-24} {2,7:0} MB  {3}", pr.Id, pr.ProcessName, mem / 1048576.0, title));
+            pids.Add(pr.Id);
+            pr.Dispose();
+        }
+        sb.AppendLine();
+        sb.AppendLine(found.Count + "개를 찾았습니다. [강제 종료]를 누르면 모두 끕니다.");
+        return sb.ToString();
+    }
+
+    public static Page Update()
+    {
+        return new CommandPage("프로그램 업데이트", "winget으로 새 버전이 나온 프로그램을 찾아 한 번에 업데이트합니다.", "winget upgrade --all",
+            "업데이트 확인", Live("winget", "upgrade --accept-source-agreements --disable-interactivity"),
+            "모두 업데이트", (CommandPage.Action)(async p =>
+            {
+                if (!Shell.Confirm("새 버전이 있는 프로그램을 모두 업데이트할까요?\n" +
+                                   "업데이트하는 프로그램은 실행 중이면 꺼질 수 있고, 중간에 관리자 권한 창이 뜰 수 있습니다.")) return null;
+                await p.Run("winget", "upgrade --all --accept-source-agreements --accept-package-agreements --disable-interactivity");
+                return null;
+            }));
     }
 
     public static Page Tools()
@@ -1066,7 +1280,9 @@ class MainForm : Form
             Item("인터넷 연결 확인", Features.Ping),
             Item("DNS 캐시 비우기", Features.Dns),
             Item("와이파이 비밀번호", Features.Wifi),
-            Item("임시 파일 정리", Features.Temp),
+            Item("포트·프로세스", Features.Ports),
+            Item("디스크 정리", Features.Temp),
+            Item("프로그램 업데이트", Features.Update),
             Item("시스템 정보", Features.SystemInfo),
             Item("배터리 리포트", Features.Battery),
             Item("시스템 파일 검사", Features.Sfc),
@@ -1075,7 +1291,7 @@ class MainForm : Form
 
         for (int i = 0; i < list.Count; i++)
         {
-            var nav = new NavItem { Number = i + 1, Text = list[i].Key, Location = new Point(10, 84 + i * 40), Size = new Size(200, 38) };
+            var nav = new NavItem { Number = i + 1, Text = list[i].Key, Location = new Point(10, 82 + i * 36), Size = new Size(200, 34) };
             var make = list[i].Value;
             nav.Click += (s, e) => Select(nav, make);
             navs.Add(nav);
