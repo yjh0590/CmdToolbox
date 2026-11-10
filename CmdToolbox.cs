@@ -26,13 +26,54 @@ static class Theme
     public static readonly Color Accent = Color.FromArgb(255, 122, 89);
     public static readonly Color AccentHover = Color.FromArgb(255, 145, 116);
 
-    public static readonly Font Body = new Font("Malgun Gothic", 10f);
-    public static readonly Font Mono = new Font("Consolas", 9.5f);
-    public static readonly Font MonoSmall = new Font("Consolas", 8.5f);
+    public static Font Body, Mono, MonoSmall;
 
-    // 화면 배율 (100% = 1, 150% = 1.5). 레이아웃은 100% 기준 픽셀로 쓰고 이 값을 곱한다
+    // 앱 확대 단계 (Ctrl + 휠, Ctrl + +/-/0). Windows 배율 위에 곱해진다
+    public static readonly float[] Zooms = { 0.8f, 0.9f, 1f, 1.1f, 1.25f, 1.5f, 1.75f, 2f };
+    public static float Zoom = 1f;
+
+    // 최종 배율 = Windows 배율 × 앱 확대. 레이아웃은 100% 기준 픽셀로 쓰고 이 값을 곱한다
     public static float Factor = 1f;
     public static int S(float v) { return (int)Math.Round(v * Factor); }
+
+    // 글꼴(pt)은 Windows 배율을 알아서 따르므로 앱 확대만 곱한다
+    public static Font F(string family, float size, FontStyle style = FontStyle.Regular)
+    {
+        return new Font(family, size * Zoom, style);
+    }
+
+    public static void Apply(float dpiFactor, float zoom)
+    {
+        Zoom = zoom;
+        Factor = dpiFactor * zoom;
+        Body = F("Malgun Gothic", 10f);
+        Mono = F("Consolas", 9.5f);
+        MonoSmall = F("Consolas", 8.5f);
+    }
+
+    static readonly string ZoomPath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "CmdToolbox", "zoom.txt");
+
+    public static float LoadZoom()
+    {
+        try
+        {
+            float z = float.Parse(File.ReadAllText(ZoomPath).Trim(), CultureInfo.InvariantCulture);
+            if (Array.IndexOf(Zooms, z) >= 0) return z;
+        }
+        catch { }
+        return 1f;
+    }
+
+    public static void SaveZoom(float z)
+    {
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(ZoomPath));
+            File.WriteAllText(ZoomPath, z.ToString(CultureInfo.InvariantCulture));
+        }
+        catch { }
+    }
 
     public static GraphicsPath Round(RectangleF r, float rad)
     {
@@ -177,7 +218,7 @@ class Ring : PaintedControl
     public float Progress;
     public bool Active;
     public string Big = "", Small = "";
-    readonly Font bigFont = new Font("Segoe UI Light", 32f);
+    readonly Font bigFont = Theme.F("Segoe UI Light", 32f);
 
     protected override void OnPaint(PaintEventArgs e)
     {
@@ -403,7 +444,7 @@ class Page : Panel
 
         Controls.Add(new Label
         {
-            Text = title, Font = new Font("Malgun Gothic", 17f, FontStyle.Bold),
+            Text = title, Font = Theme.F("Malgun Gothic", 17f, FontStyle.Bold),
             Location = new Point(32, 24), AutoSize = true
         });
         Controls.Add(new Label
@@ -432,6 +473,7 @@ class CommandPage : Page
     readonly StringBuilder pending = new StringBuilder();
     readonly Timer flush = new Timer { Interval = 100 };
     RoundButton running;
+    public static int Busy; // 지금 실행 중인 명령 수 (모든 페이지 합계)
     CancellationTokenSource cts;
     bool fresh;   // 아직 "실행 중..."만 보이는 상태
     bool touched; // 이번 실행에서 출력을 쓴 적 있음
@@ -466,7 +508,7 @@ class CommandPage : Page
             Text = text, Size = new Size(150, 42),
             Fill = primary ? Theme.Accent : Theme.Surface, HoverFill = primary ? Theme.AccentHover : Theme.SurfaceHover,
             ForeColor = primary ? Theme.Bg : Theme.Text,
-            Font = primary ? new Font("Malgun Gothic", 10f, FontStyle.Bold) : Theme.Body
+            Font = primary ? Theme.F("Malgun Gothic", 10f, FontStyle.Bold) : Theme.Body
         };
         buttons.Add(b);
         slots.Add(b);
@@ -576,6 +618,7 @@ class CommandPage : Page
     {
         string label = b.Text, before = output.Text;
         running = b;
+        Busy++;
         cts = new CancellationTokenSource();
         foreach (var x in buttons) x.Enabled = x == b;
         b.Text = "중지";
@@ -600,6 +643,7 @@ class CommandPage : Page
         lastResult = output.Text;
 
         running = null;
+        Busy--;
         cts.Dispose();
         cts = null;
         b.Text = label;
@@ -671,7 +715,7 @@ class ShutdownPage : Page
         {
             Text = "종료 예약", Location = new Point(32, 390), Size = new Size(536, 50),
             Fill = Theme.Accent, HoverFill = Theme.AccentHover, ForeColor = Theme.Bg, Radius = 12,
-            Font = new Font("Malgun Gothic", 12f, FontStyle.Bold)
+            Font = Theme.F("Malgun Gothic", 12f, FontStyle.Bold)
         };
         start.Click += (s, e) => Schedule();
         Controls.Add(start);
@@ -709,7 +753,7 @@ class ShutdownPage : Page
         var nud = new NumericUpDown
         {
             Maximum = max, BorderStyle = BorderStyle.None, TextAlign = HorizontalAlignment.Right,
-            BackColor = Theme.Surface, ForeColor = Theme.Text, Font = new Font("Segoe UI Semibold", 15f)
+            BackColor = Theme.Surface, ForeColor = Theme.Text, Font = Theme.F("Segoe UI Semibold", 15f)
         };
         // 기본 화살표를 숨기고, 화살표가 있던 자리(흰 칸)는 바깥 패널로 잘라서 안 보이게 함
         var arrows = nud.Controls[0];
@@ -717,6 +761,8 @@ class ShutdownPage : Page
         nud.Width = 80 + arrows.Width;
         var clip = new Panel { Location = new Point(70, 14), Size = new Size(80, nud.Height), BackColor = Theme.Surface };
         clip.Controls.Add(nud);
+        // 배율을 곱하면 숨긴 화살표 폭까지 커져 숫자 칸이 오른쪽으로 밀리므로, 화살표만 잘리도록 다시 맞춤
+        nud.Resize += (s, e) => { int w = clip.Width + arrows.Width; if (nud.Width != w) nud.Width = w; };
 
         var minus = new RoundButton { Text = "−", Location = new Point(10, 12), Size = new Size(32, 32), Radius = 16, BackColor = Theme.Surface, Fill = Theme.SurfaceHover, HoverFill = Theme.Dim };
         var plus = new RoundButton { Text = "+", Location = new Point(246, 12), Size = new Size(32, 32), Radius = 16, BackColor = Theme.Surface, Fill = Theme.SurfaceHover, HoverFill = Theme.Dim };
@@ -1240,11 +1286,15 @@ static class Features
 }
 
 // ───────────────────────── 메인 창 ─────────────────────────
-class MainForm : Form
+class MainForm : Form, IMessageFilter
 {
     readonly Panel content;
     readonly List<NavItem> navs = new List<NavItem>();
     readonly Dictionary<NavItem, Page> pages = new Dictionary<NavItem, Page>();
+
+    static ApplicationContext context;
+    static float dpiFactor = 1f; // Windows 배율 (100% = 1, 150% = 1.5)
+    static int wheel;            // 터치패드처럼 휠이 잘게 들어올 때 한 칸(120)이 찰 때까지 모음
 
     [DllImport("dwmapi.dll")]
     static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int value, int size);
@@ -1252,9 +1302,9 @@ class MainForm : Form
     [DllImport("user32.dll")]
     static extern bool SetProcessDPIAware();
 
-    MainForm()
+    MainForm(int selected)
     {
-        Text = "명령어 도구함";
+        Text = Theme.Zoom == 1f ? "명령어 도구함" : "명령어 도구함 · " + Math.Round(Theme.Zoom * 100) + "%";
         Font = Theme.Body;
         BackColor = Theme.Bg;
         ForeColor = Theme.Text;
@@ -1268,7 +1318,7 @@ class MainForm : Form
         Controls.Add(content);
 
         var side = new Panel { Location = new Point(0, 0), Size = new Size(220, 560), BackColor = Theme.Sidebar };
-        side.Controls.Add(new Label { Text = "명령어 도구함", Font = new Font("Malgun Gothic", 13f, FontStyle.Bold), Location = new Point(20, 22), AutoSize = true });
+        side.Controls.Add(new Label { Text = "명령어 도구함", Font = Theme.F("Malgun Gothic", 13f, FontStyle.Bold), Location = new Point(20, 22), AutoSize = true });
         side.Controls.Add(new Label { Text = "cmd 명령어를 버튼 하나로", ForeColor = Theme.Dim, Location = new Point(21, 50), AutoSize = true });
         Controls.Add(side);
 
@@ -1298,10 +1348,66 @@ class MainForm : Form
             side.Controls.Add(nav);
         }
 
-        // 100% 기준으로 배치한 위치와 크기를 화면 배율에 맞게 키움 (글자는 Windows가 알아서 키움)
+        // 100% 기준으로 배치한 위치와 크기를 화면 배율 × 앱 확대에 맞게 키움 (글자는 Theme.F가 처리)
         ScaleToScreen(side);
         ScaleToScreen(content);
-        Select(navs[0], list[0].Value);
+        Select(navs[selected], list[selected].Value);
+        Application.AddMessageFilter(this);
+    }
+
+    protected override void OnFormClosed(FormClosedEventArgs e)
+    {
+        Application.RemoveMessageFilter(this);
+        base.OnFormClosed(e);
+    }
+
+    // Ctrl + 휠: 창 안 어디서든 확대/축소
+    public bool PreFilterMessage(ref Message m)
+    {
+        const int WM_MOUSEWHEEL = 0x020A;
+        if (m.Msg != WM_MOUSEWHEEL || ModifierKeys != Keys.Control || ActiveForm != this) return false;
+        wheel += (short)((long)m.WParam >> 16);
+        if (wheel >= 120) { wheel = 0; ChangeZoom(1); }
+        else if (wheel <= -120) { wheel = 0; ChangeZoom(-1); }
+        return true;
+    }
+
+    // Ctrl + +/-: 한 단계 확대/축소, Ctrl + 0: 원래 크기
+    protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+    {
+        switch (keyData)
+        {
+            case Keys.Control | Keys.Oemplus:
+            case Keys.Control | Keys.Add: ChangeZoom(1); return true;
+            case Keys.Control | Keys.OemMinus:
+            case Keys.Control | Keys.Subtract: ChangeZoom(-1); return true;
+            case Keys.Control | Keys.D0:
+            case Keys.Control | Keys.NumPad0: ChangeZoom(0); return true;
+        }
+        return base.ProcessCmdKey(ref msg, keyData);
+    }
+
+    // 배율을 바꾸고 창을 새 크기로 다시 만듦. 보던 페이지와 창 가운데 위치는 유지
+    void ChangeZoom(int step)
+    {
+        int now = Array.IndexOf(Theme.Zooms, Theme.Zoom);
+        int next = step == 0 ? Array.IndexOf(Theme.Zooms, 1f)
+                             : Math.Max(0, Math.Min(Theme.Zooms.Length - 1, now + step));
+        if (next == now) return;
+        // 실행 중인 명령이 있으면 창을 다시 만들 때 끊기므로 바꾸지 않음
+        if (CommandPage.Busy > 0) { System.Media.SystemSounds.Beep.Play(); return; }
+
+        Theme.Apply(dpiFactor, Theme.Zooms[next]);
+        Theme.SaveZoom(Theme.Zoom);
+
+        var form = new MainForm(navs.FindIndex(n => n.Selected)) { StartPosition = FormStartPosition.Manual };
+        var area = Screen.FromControl(this).WorkingArea;
+        int x = Left + Width / 2 - form.Width / 2, y = Top + Height / 2 - form.Height / 2;
+        form.Location = new Point(Math.Max(area.Left, Math.Min(x, area.Right - form.Width)),
+                                  Math.Max(area.Top, Math.Min(y, area.Bottom - form.Height)));
+        context.MainForm = form; // 이 창을 닫아도 앱이 끝나지 않게
+        form.Show();
+        Close();
     }
 
     static void ScaleToScreen(Control c)
@@ -1341,11 +1447,13 @@ class MainForm : Form
     {
         // 화면 배율이 100%가 아니어도 흐리게 늘어나지 않고 선명하게 그리도록
         try { SetProcessDPIAware(); } catch { }
-        using (var g = Graphics.FromHwnd(IntPtr.Zero)) Theme.Factor = g.DpiX / 96f;
+        using (var g = Graphics.FromHwnd(IntPtr.Zero)) dpiFactor = g.DpiX / 96f;
+        Theme.Apply(dpiFactor, Theme.LoadZoom());
 
         ShutdownPlan.Load();
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
-        Application.Run(new MainForm());
+        context = new ApplicationContext(new MainForm(0));
+        Application.Run(context);
     }
 }
